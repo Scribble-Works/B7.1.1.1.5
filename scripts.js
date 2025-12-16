@@ -1,341 +1,233 @@
-// Decimal Dash — ENHANCED AND COMPLETE VERSION
-(() => {
-    // === ELEMENT REFERENCES ===
-    const originalEl = document.getElementById('originalNumber');
-    const taskEl = document.getElementById('taskText');
-    const answerInput = document.getElementById('answer');
-    const submitBtn = document.getElementById('submitBtn');
-    const hintBtn = document.getElementById('hintBtn');
-    const skipBtn = document.getElementById('skipBtn');
-    const startBtn = document.getElementById('startBtn');
-    const restartBtn = document.getElementById('restartBtn');
-    const feedbackEl = document.getElementById('feedback');
-    const scoreEl = document.getElementById('score');
-    const livesEl = document.getElementById('lives');
-    const timerEl = document.getElementById('timer');
-    const levelBadge = document.getElementById('levelBadge');
-    const modal = document.getElementById('modal'); // Game Over container
-    const modalStart = document.getElementById('modalStart'); // Start screen container
-    const gameArea = document.getElementById('gameArea'); // Main game UI container
-    const levelPopup = document.getElementById('levelPopup');
-    const popupScore = document.getElementById('popupScore');
-    const popupNext = document.getElementById('popupNext');
-    const popupNextLevel = document.getElementById('popupNextLevel');
+// Helper: Count leading zeros after decimal (for s.f. logic)
+function getSignificantStart(str) {
+    str = str.replace(/^-/, ''); // Remove minus if any (not used here)
+    if (str.includes('.')) {
+        const [intPart, decPart] = str.split('.');
+        if (parseInt(intPart) !== 0) {
+            return intPart.length; // e.g., 123.45 → starts at '1'
+        } else {
+            // Count leading zeros in decimal: 0.00456 → starts at 3rd dec digit
+            let i = 0;
+            while (i < decPart.length && decPart[i] === '0') i++;
+            return i + 1; // position after decimal where s.f. begin
+        }
+    } else {
+        // Whole number: trailing zeros may be ambiguous, but we avoid them
+        return str.length - (str.match(/0*$/) || [''])[0].length;
+    }
+}
 
-    // === GAME STATE ===
-    let mode = 'decimals';
-    document.querySelectorAll('input[name="mode"]').forEach(r =>
-        r.addEventListener('change', e => {
-            mode = e.target.value;
-            if (playing) startGame(); // Reset the game if mode changes mid-play
-            else updateTaskDisplay();
+// Round to significant figures
+function toSignificantFigures(num, sigFigs) {
+    if (num === 0) return 0;
+    const d = Math.ceil(Math.log10(Math.abs(num)));
+    const power = sigFigs - d;
+    const magnitude = Math.pow(10, power);
+    const shifted = Math.round(num * magnitude);
+    return shifted / magnitude;
+}
+
+// Round to decimal places
+function toDecimalPlaces(num, decimals) {
+    const factor = Math.pow(10, decimals);
+    return Math.round(num * factor) / factor;
+}
+
+// Generate plausible distractors
+function generateDistractors(correct, type, value) {
+    const set = new Set();
+    const tries = 0;
+    let attempts = 0;
+    while (set.size < 3 && attempts < 20) {
+        let wrong;
+        if (type === 'sf') {
+            // Perturb by ±1 in the last significant digit
+            const scale = Math.pow(10, Math.floor(Math.log10(Math.abs(correct))) - (value - 1));
+            const offset = (Math.random() > 0.5 ? 1 : -1) * scale;
+            wrong = parseFloat((correct + offset).toPrecision(value));
+        } else {
+            // Decimal places: ±0.5 * 10^(-decimals)
+            const step = Math.pow(10, -value);
+            const offset = (Math.random() > 0.5 ? 1 : -1) * step;
+            wrong = parseFloat((correct + offset).toFixed(value));
+        }
+        if (wrong > 0 && Math.abs(wrong - correct) > 1e-10) {
+            set.add(wrong);
+        }
+        attempts++;
+    }
+    return Array.from(set).slice(0, 3);
+}
+
+// Generate questions
+const questions = [];
+
+// Decimal places questions
+for (let i = 0; i < 5; i++) {
+    const num = parseFloat((Math.random() * 200).toFixed(6)); // 0 to 200
+    const decimals = Math.floor(Math.random() * 4) + 1; // 1 to 4 d.p.
+    const correct = toDecimalPlaces(num, decimals);
+    const options = [correct, ...generateDistractors(correct, 'dp', decimals)];
+    shuffleArray(options);
+    questions.push({
+        number: num,
+        instruction: `Round to ${decimals} decimal place${decimals > 1 ? 's' : ''}.`,
+        correctAnswer: correct,
+        options: options.map(n => parseFloat(n.toFixed(decimals > 4 ? 5 : decimals)))
+    });
+}
+
+// Significant figures questions
+for (let i = 0; i < 5; i++) {
+    // Mix: some small (0.00x), some larger (123.456)
+    const num = Math.random() < 0.5 
+        ? parseFloat((Math.random() * 0.1).toFixed(6)) // e.g., 0.045678
+        : parseFloat((Math.random() * 500).toFixed(6)); // e.g., 234.567891
+    const sigFigs = Math.floor(Math.random() * 3) + 2; // 2 to 4 s.f.
+    const correct = toSignificantFigures(num, sigFigs);
+    const options = [correct, ...generateDistractors(correct, 'sf', sigFigs)];
+    shuffleArray(options);
+    questions.push({
+        number: num,
+        instruction: `Give to ${sigFigs} significant figure${sigFigs > 1 ? 's' : ''}.`,
+        correctAnswer: correct,
+        options: options.map(n => {
+            // Format using toPrecision but avoid scientific notation
+            const str = n.toPrecision(sigFigs);
+            if (str.includes('e')) {
+                return parseFloat(n.toFixed(6));
+            }
+            return parseFloat(str);
         })
-    );
+    });
+}
 
-    let score = 0;
-    let lives = 3;
-    let level = 1;
-    let round = 0;
-    let timeLeft = 30;
-    let timerInterval = null;
-    let current = null;
-    let playing = false;
+// Shuffle all questions
+shuffleArray(questions);
 
-    // === SOUND UTILITY (Mocked) ===
-    function playSound(type) {
-        console.log(`Playing sound: ${type}`);
+let currentQuestionIndex = 0;
+let score = 0;
+let correctSound, wrongSound;
+
+function initAudio() {
+    correctSound = new Audio('assets/brass-fanfare-reverberated-146263.mp3');
+    wrongSound = new Audio('assets/cartoon-fail-trumpet-278822.mp3');
+    correctSound.load();
+    wrongSound.load();
+}
+
+function shuffleArray(array) {
+    for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]];
+    }
+}
+
+function switchScreen(id) {
+    document.querySelectorAll('.screen').forEach(screen => {
+        screen.classList.remove('active');
+    });
+    document.getElementById(id).classList.add('active');
+}
+
+function startGame() {
+    currentQuestionIndex = 0;
+    score = 0;
+    switchScreen('quiz-screen');
+    loadQuestion();
+}
+
+function loadQuestion() {
+    if (currentQuestionIndex >= questions.length) {
+        gameOver();
+        return;
     }
 
-    // === RANDOM NUMBER GENERATOR ===
-    function randomNumberForLevel(lvl) {
-        const base = (Math.random() * 900 + 100) / Math.pow(10, Math.floor(Math.random() * 4));
-        const sign = Math.random() < 0.1 ? -1 : 1;
-        return Number((sign * base).toPrecision(10));
-    }
-
-    // === PICK A TASK ===
-    function pickTaskForLevel(lvl) {
-        const value = randomNumberForLevel(lvl);
-        if (mode === 'decimals') {
-            const places = Math.min(6, 1 + Math.floor(lvl / 2) + Math.floor(Math.random() * 3));
-            return { value, type: 'decimals', places };
-        } else {
-            const sig = Math.min(6, 1 + Math.floor(lvl / 2) + Math.floor(Math.random() * 3));
-            return { value, type: 'sigfigs', sig };
-        }
-    }
-
-    function formatOriginal(n) {
-        if (Math.abs(n) >= 1e6 || (Math.abs(n) < 1e-6 && n !== 0)) return n.toExponential(4);
-        return Number(n).toString();
-    }
-
-    // === UI UPDATERS ===
-    function updateUI() {
-        scoreEl.textContent = score;
-        livesEl.textContent = lives;
-        levelBadge.textContent = `Level ${level}`;
-        livesEl.parentElement.classList.toggle('bg-red-300', lives === 1);
-        livesEl.parentElement.classList.toggle('bg-red-100', lives > 1);
-    }
-
-    function updateTaskDisplay() {
-        if (!current) return;
-        originalEl.textContent = formatOriginal(current.value);
-        if (current.type === 'decimals') {
-            taskEl.textContent = `Express to ${current.places} decimal place${current.places > 1 ? 's' : ''}.`;
-        } else {
-            taskEl.textContent = `Express to ${current.sig} significant figure${current.sig > 1 ? 's' : ''}.`;
-        }
-    }
-
-    // === ROUND FLOW ===
-    function startRound() {
-        if (!playing) return;
-        round++;
-        answerInput.value = '';
-        feedbackEl.textContent = 'Type your answer and press Enter or Submit!';
-        feedbackEl.className = 'feedback';
-        
-        current = pickTaskForLevel(level);
-        updateTaskDisplay();
-        
-        startTimer();
-        answerInput.focus();
-        
-        // Ensure buttons are active
-        submitBtn.disabled = false;
-        hintBtn.disabled = false;
-        skipBtn.disabled = false;
-    }
-
-    function startTimer() {
-        stopTimer();
-        timeLeft = 30 - Math.min(12, Math.floor(level / 2));
-        showTime();
-        timerInterval = setInterval(() => {
-            timeLeft--;
-            showTime();
-            if (timeLeft <= 0) {
-                stopTimer();
-                onTimeOut();
-            }
-        }, 1000);
-    }
-
-    function stopTimer() {
-        if (timerInterval) clearInterval(timerInterval);
-        timerInterval = null;
-    }
-
-    function showTime() {
-        const mm = String(Math.floor(timeLeft / 60)).padStart(2, '0');
-        const ss = String(timeLeft % 60).padStart(2, '0');
-        timerEl.textContent = `${mm}:${ss}`;
-        timerEl.classList.toggle('text-red-600', timeLeft <= 10);
-    }
-
-    // === CHECKING ANSWERS ===
-    function expectedAnswerString(task) {
-        return task.type === 'decimals'
-            ? Number(task.value).toFixed(task.places)
-            : Number(task.value).toPrecision(task.sig);
-    }
-
-    function checkAnswer(userVal) {
-        const num = Number(userVal);
-        if (Number.isNaN(num)) return false; 
-        
-        const expected = expectedAnswerString(current);
-        return userVal.trim() === expected.trim();
-    }
-
-    function onCorrect() {
-        stopTimer();
-        playSound('success');
-        score += 10 * level;
-        feedbackEl.textContent = '✅ Correct! Points earned: ' + (10 * level);
-        feedbackEl.className = 'feedback success';
-        updateUI();
-        if (round % 5 === 0) levelUp();
-        else nextTurnDelayed();
-    }
-
-    function onWrong() {
-        stopTimer();
-        playSound('fail');
-        lives--;
-        const ans = expectedAnswerString(current);
-        feedbackEl.textContent = `❌ Wrong. Correct answer was: ${ans}`;
-        feedbackEl.className = 'feedback error';
-        updateUI();
-        nextTurnDelayed();
-    }
-
-    function onTimeOut() {
-        stopTimer();
-        playSound('fail');
-        lives--;
-        feedbackEl.textContent = `⏰ Time's up! Correct answer was: ${expectedAnswerString(current)}`;
-        feedbackEl.className = 'feedback error';
-        updateUI();
-        nextTurnDelayed();
-    }
-
-    function nextTurnDelayed() {
-        submitBtn.disabled = true;
-        hintBtn.disabled = true;
-        skipBtn.disabled = true;
-
-        if (lives <= 0) return setTimeout(endGame, 1500);
-
-        setTimeout(() => {
-            startRound();
-        }, 1500);
-    }
-
-    function startGame() {
-        playing = true;
-        score = 0;
-        lives = 3;
-        level = 1;
-        round = 0;
-        
-        // Hide menus and show the game area
-        modalStart.classList.add('hidden');
-        modal.classList.add('hidden');
-        gameArea.classList.remove('hidden');
-        
-        updateUI();
-        startRound();
-    }
-
-    function endGame() {
-        stopTimer();
-        playing = false;
-        
-        submitBtn.disabled = true;
-        hintBtn.disabled = true;
-        skipBtn.disabled = true;
-
-        feedbackEl.textContent = `💀 Game Over! Final score: ${score}. Click Restart to try again.`;
-        feedbackEl.className = 'feedback error';
-        
-        modal.classList.remove('hidden');
-        gameArea.classList.add('hidden');
-    }
-
-    function levelUp() {
-        stopTimer();
-        level++;
-        popupNextLevel.textContent = level;
-        popupScore.textContent = score;
-        levelPopup.classList.remove('hidden');
-    }
-
-    // === BUTTON ACTIONS AND EVENT LISTENERS ===
+    const q = questions[currentQuestionIndex];
+    document.getElementById('question-number').textContent = `Question ${currentQuestionIndex + 1}/${questions.length}`;
+    document.getElementById('instruction-text').textContent = q.instruction;
     
-    // Game Start/Restart
-    startBtn.addEventListener('click', startGame);
-    restartBtn.addEventListener('click', startGame);
+    // Display original number clearly
+    const displayNum = q.number % 1 === 0 ? q.number : q.number.toFixed(Math.max(5, (q.number.toString().split('.')[1] || '').length));
+    document.getElementById('number-to-process').textContent = displayNum;
 
-    // Level Up Popup
-    popupNext.addEventListener('click', () => {
-        levelPopup.classList.add('hidden');
-        startRound();
-    });
+    const optionsContainer = document.getElementById('options-container');
+    optionsContainer.innerHTML = '';
 
-    // Submission Logic
-    submitBtn.addEventListener('click', () => {
-        if (!playing || submitBtn.disabled) return;
-        const val = answerInput.value.trim();
-        if (!val) {
-            feedbackEl.textContent = 'Please type an answer.';
-            feedbackEl.className = 'feedback error';
-            return;
-        }
-        checkAnswer(val) ? onCorrect() : onWrong();
-    });
-
-    answerInput.addEventListener('keydown', e => {
-        if (e.key === 'Enter') submitBtn.click();
-    });
-
-    // --- ENHANCED HINT BUTTON ---
-    hintBtn.addEventListener('click', () => {
-        if (!playing || hintBtn.disabled) return;
-
-        stopTimer(); // Stop the clock while the user reads the hint
-        const expected = expectedAnswerString(current);
+    q.options.forEach(option => {
+        const button = document.createElement('button');
+        button.classList.add('option-button');
         
-        // Find the index of the first incorrect character or the end of the input
-        let hintIndex = 0;
-        const currentInput = answerInput.value.trim();
-        for (let i = 0; i < currentInput.length; i++) {
-            if (currentInput.charAt(i) !== expected.charAt(i)) {
-                hintIndex = i;
-                break;
+        // Format answer: avoid excessive trailing zeros
+        let formatted;
+        if (q.instruction.includes('decimal')) {
+            const decimals = parseInt(q.instruction.match(/\d+/)[0]);
+            formatted = option.toFixed(decimals);
+        } else {
+            const sigFigs = parseInt(q.instruction.match(/\d+/)[0]);
+            formatted = option.toPrecision(sigFigs);
+            // Convert scientific notation if needed
+            if (formatted.includes('e')) {
+                formatted = parseFloat(option.toFixed(6)).toString();
             }
         }
-
-        const nextChar = expected.charAt(hintIndex);
+        // Remove unnecessary trailing zeros after decimal
+        formatted = parseFloat(formatted).toString();
         
-        // Cost of the hint: a slight score reduction
-        score = Math.max(0, score - 5); 
-        updateUI();
-        hintBtn.disabled = true; // One hint per round
+        button.textContent = formatted;
+        button.onclick = () => selectOption(button, formatted, (() => {
+            let correctFormatted;
+            if (q.instruction.includes('decimal')) {
+                const d = parseInt(q.instruction.match(/\d+/)[0]);
+                correctFormatted = q.correctAnswer.toFixed(d);
+            } else {
+                const s = parseInt(q.instruction.match(/\d+/)[0]);
+                correctFormatted = q.correctAnswer.toPrecision(s);
+                if (correctFormatted.includes('e')) {
+                    correctFormatted = parseFloat(q.correctAnswer.toFixed(6)).toString();
+                }
+            }
+            return parseFloat(correctFormatted).toString();
+        })());
+        optionsContainer.appendChild(button);
+    });
+}
 
-        if (hintIndex < expected.length) {
-            feedbackEl.textContent = `💡 Hint: The correct ${current.type === 'decimals' ? 'digit' : 'figure'} at position ${hintIndex + 1} is '${nextChar}'.`;
-            feedbackEl.className = 'feedback error'; // Use error color to emphasize the score penalty
-            
-            // Give the user the remaining time back (or a minimum of 5 seconds)
-            timeLeft = Math.max(5, timeLeft); 
-            startTimer(); // Restart the timer
-        } else {
-            // If the user has typed a longer string than the answer
-            feedbackEl.textContent = `💡 Hint: Your answer is too long! The answer is only ${expected.length} characters.`;
-            feedbackEl.className = 'feedback error'; 
-            timeLeft = Math.max(5, timeLeft);
-            startTimer();
+function selectOption(selectedButton, selectedAnswer, correctAnswer) {
+    document.querySelectorAll('.option-button').forEach(btn => {
+        btn.disabled = true;
+        if (btn.textContent === correctAnswer) {
+            btn.classList.add('correct');
+        } else if (btn === selectedButton) {
+            btn.classList.add('incorrect');
         }
     });
-    
-    // --- LESS PUNISHING SKIP BUTTON ---
-    skipBtn.addEventListener('click', () => {
-        if (!playing || skipBtn.disabled) return;
-        
-        stopTimer(); // Stop the timer first
-        
-        // Penalty: No loss of life, but a slight score penalty and time reset
-        score = Math.max(0, score - 10);
-        updateUI();
 
-        const ans = expectedAnswerString(current);
-        feedbackEl.textContent = `⏭️ Skipped. The correct answer was: ${ans}`;
-        feedbackEl.className = 'feedback error';
-        playSound('fail');
-        
-        // Immediately move to the next round after displaying the answer
-        nextTurnDelayed();
-    });
+    if (selectedAnswer === correctAnswer) {
+        score++;
+        correctSound.currentTime = 0;
+        correctSound.play().catch(e => console.log("Correct sound:", e.message));
+    } else {
+        wrongSound.currentTime = 0;
+        wrongSound.play().catch(e => console.log("Wrong sound:", e.message));
+    }
 
+    setTimeout(() => {
+        currentQuestionIndex++;
+        loadQuestion();
+    }, 1400);
+}
 
-    // Initial Setup
-    document.addEventListener('DOMContentLoaded', () => {
-        updateUI();
-        
-        gameArea.classList.add('hidden');
-        modal.classList.add('hidden');
-        modalStart.classList.remove('hidden'); // Show the Start screen initially
+function gameOver() {
+    document.getElementById('final-score').textContent = `You scored ${score} out of ${questions.length}!`;
+    switchScreen('game-over-screen');
+}
 
-        current = pickTaskForLevel(1);
-        updateTaskDisplay();
-        
-        // Hide controls until game starts
-        submitBtn.disabled = true;
-        hintBtn.disabled = true;
-        skipBtn.disabled = true;
-    });
+function restartGame() {
+    switchScreen('start-screen');
+}
 
-})(); // End of the IIFE
+document.addEventListener('DOMContentLoaded', () => {
+    initAudio();
+    switchScreen('start-screen');
+});
